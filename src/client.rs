@@ -1,5 +1,7 @@
 use http_body_util::{BodyExt, Full};
-use hyper::{http, Method};
+use hyper::body::Bytes;
+use hyper::http;
+use hyper::Method;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rand::prelude::*;
 use std::{
@@ -18,13 +20,14 @@ use tokio::{
 use url::{ParseError, Url};
 
 use crate::{
+    body::{Body, BodyBuilder, Id},
     pcg64si::Pcg64Si,
     url_generator::{UrlGenerator, UrlGeneratorError},
     ConnectToEntry,
 };
 
-type SendRequestHttp1 = hyper::client::conn::http1::SendRequest<Full<&'static [u8]>>;
-type SendRequestHttp2 = hyper::client::conn::http2::SendRequest<Full<&'static [u8]>>;
+type SendRequestHttp1 = hyper::client::conn::http1::SendRequest<Full<Body>>;
+type SendRequestHttp2 = hyper::client::conn::http2::SendRequest<Full<Body>>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionTime {
@@ -49,12 +52,28 @@ pub struct RequestResult {
     pub status: http::StatusCode,
     /// Length of body
     pub len_bytes: usize,
+    /// Id of a related request
+    pub idx: Id,
+    /// Optional response payload
+    pub response: Option<Vec<Bytes>>,
 }
 
 impl RequestResult {
     /// Duration the request takes.
     pub fn duration(&self) -> std::time::Duration {
         self.end - self.start_latency_correction.unwrap_or(self.start)
+    }
+
+    pub fn text_response(&self) -> Option<String> {
+        let response = self.response.as_deref()?.iter().fold(
+            Vec::with_capacity(self.len_bytes),
+            |mut buf, chunk| {
+                buf.extend_from_slice(chunk);
+                buf
+            },
+        );
+        let text = String::from_utf8_lossy(&response).to_string();
+        Some(text)
     }
 }
 
@@ -169,7 +188,8 @@ pub struct Client {
     pub url_generator: UrlGenerator,
     pub method: http::Method,
     pub headers: http::header::HeaderMap,
-    pub body: Option<&'static [u8]>,
+    pub body: BodyBuilder,
+    pub keep_responses: bool,
     pub dns: Dns,
     pub timeout: Option<std::time::Duration>,
     pub redirect_limit: usize,
@@ -187,6 +207,16 @@ pub struct Client {
 struct ClientStateHttp1 {
     rng: Pcg64Si,
     send_request: Option<SendRequestHttp1>,
+    response_chunks: usize,
+}
+
+impl ClientStateHttp1 {
+    fn update_response_chunks(&mut self, response: Option<&[Bytes]>) {
+        let chunks = response.map(|response| response.len()).unwrap_or_default();
+        if chunks > self.response_chunks {
+            self.response_chunks = chunks;
+        }
+    }
 }
 
 impl Default for ClientStateHttp1 {
@@ -194,6 +224,7 @@ impl Default for ClientStateHttp1 {
         Self {
             rng: SeedableRng::from_entropy(),
             send_request: None,
+            response_chunks: 2,
         }
     }
 }
@@ -201,6 +232,7 @@ impl Default for ClientStateHttp1 {
 struct ClientStateHttp2 {
     rng: Pcg64Si,
     send_request: SendRequestHttp2,
+    response_chunks: usize,
 }
 
 impl Clone for ClientStateHttp2 {
@@ -208,6 +240,16 @@ impl Clone for ClientStateHttp2 {
         Self {
             rng: SeedableRng::from_entropy(),
             send_request: self.send_request.clone(),
+            response_chunks: self.response_chunks,
+        }
+    }
+}
+
+impl ClientStateHttp2 {
+    fn update_response_chunks(&mut self, response: Option<&[Bytes]>) {
+        let chunks = response.map(|response| response.len()).unwrap_or_default();
+        if chunks > self.response_chunks {
+            self.response_chunks = chunks;
         }
     }
 }
@@ -539,8 +581,23 @@ impl Client {
         }
     }
 
+    fn request(&self, url: &Url) -> Result<(Id, http::Request<Full<Body>>), ClientError> {
+        let (idx, body) = self.body.next_body();
+        self.request_with_body(url, body)
+            .map(|request| (idx, request))
+    }
+
+    fn request_idx(&self, url: &Url, idx: Id) -> Result<http::Request<Full<Body>>, ClientError> {
+        let body = self.body.body_by_index(idx);
+        self.request_with_body(url, body)
+    }
+
     #[inline]
-    fn request(&self, url: &Url) -> Result<http::Request<Full<&'static [u8]>>, ClientError> {
+    fn request_with_body(
+        &self,
+        url: &Url,
+        body: Full<Body>,
+    ) -> Result<http::Request<Full<Body>>, ClientError> {
         let use_proxy = self.proxy_url.is_some() && url.scheme() == "http";
 
         let mut builder = http::Request::builder()
@@ -556,15 +613,12 @@ impl Client {
                 self.http_version
             });
 
-        *builder
+        let headers = builder
             .headers_mut()
-            .ok_or(ClientError::GetHeaderFromBuilderError)? = self.headers.clone();
-
-        if let Some(body) = self.body {
-            Ok(builder.body(Full::new(body))?)
-        } else {
-            Ok(builder.body(Full::default())?)
-        }
+            .ok_or(ClientError::GetHeaderFromBuilderError)?;
+        self.headers.clone_into(headers);
+        let request = builder.body(body)?;
+        Ok(request)
     }
 
     async fn work_http1(
@@ -596,16 +650,29 @@ impl Client {
                 let dialup = std::time::Instant::now();
                 connection_time = Some(ConnectionTime { dns_lookup, dialup });
             }
-            let request = self.request(&url)?;
+
+            let (idx, request) = self.request(&url)?;
+
             match send_request.send_request(request).await {
                 Ok(res) => {
                     let (parts, mut stream) = res.into_parts();
                     let mut status = parts.status;
 
                     let mut len_sum = 0;
+                    let mut response = self
+                        .keep_responses
+                        .then(|| Vec::with_capacity(client_state.response_chunks));
                     while let Some(chunk) = stream.frame().await {
-                        len_sum += chunk?.data_ref().map(|d| d.len()).unwrap_or_default();
+                        if let Ok(chunk) = chunk?.into_data() {
+                            len_sum += chunk.len();
+                            if let Some(response) = response.as_mut() {
+                                response.push(chunk);
+                            }
+                        }
                     }
+
+                    // Keep number of frames as a hint for future responses
+                    client_state.update_response_chunks(response.as_deref());
 
                     if self.redirect_limit != 0 {
                         if let Some(location) = parts.headers.get("Location") {
@@ -613,6 +680,7 @@ impl Client {
                                 .redirect(
                                     send_request,
                                     &url,
+                                    idx,
                                     location,
                                     self.redirect_limit,
                                     &mut client_state.rng,
@@ -635,6 +703,8 @@ impl Client {
                         status,
                         len_bytes: len_sum,
                         connection_time,
+                        idx,
+                        response,
                     };
 
                     if !self.disable_keepalive {
@@ -663,6 +733,7 @@ impl Client {
             do_req.await
         }
     }
+
     async fn connect_http2<R: Rng>(
         &self,
         url: &Url,
@@ -721,16 +792,28 @@ impl Client {
             let start = std::time::Instant::now();
             let connection_time: Option<ConnectionTime> = None;
 
-            let request = self.request(&url)?;
+            let (idx, request) = self.request(&url)?;
             match client_state.send_request.send_request(request).await {
                 Ok(res) => {
                     let (parts, mut stream) = res.into_parts();
                     let status = parts.status;
 
                     let mut len_sum = 0;
+                    let mut response = self
+                        .keep_responses
+                        .then(|| Vec::with_capacity(client_state.response_chunks));
+
                     while let Some(chunk) = stream.frame().await {
-                        len_sum += chunk?.data_ref().map(|d| d.len()).unwrap_or_default();
+                        if let Ok(chunk) = chunk?.into_data() {
+                            len_sum += chunk.len();
+                            if let Some(response) = response.as_mut() {
+                                response.push(chunk);
+                            }
+                        }
                     }
+
+                    // Keep number of frames as a hint for future responses
+                    client_state.update_response_chunks(response.as_deref());
 
                     let end = std::time::Instant::now();
 
@@ -742,6 +825,8 @@ impl Client {
                         status,
                         len_bytes: len_sum,
                         connection_time,
+                        idx,
+                        response,
                     };
 
                     Ok::<_, ClientError>(result)
@@ -769,6 +854,7 @@ impl Client {
         &self,
         send_request: SendRequestHttp1,
         base_url: &Url,
+        idx: Id,
         location: &http::header::HeaderValue,
         limit: usize,
         rng: &mut R,
@@ -798,7 +884,7 @@ impl Client {
             send_request = stream;
         }
 
-        let mut request = self.request(&url)?;
+        let mut request = self.request_idx(&url, idx)?;
         if url.authority() != base_url.authority() {
             request.headers_mut().insert(
                 http::header::HOST,
@@ -816,7 +902,7 @@ impl Client {
 
         if let Some(location) = parts.headers.get("Location") {
             let (send_request_redirect, new_status, len) =
-                Box::pin(self.redirect(send_request, &url, location, limit - 1, rng)).await?;
+                Box::pin(self.redirect(send_request, &url, idx, location, limit - 1, rng)).await?;
             send_request = send_request_redirect;
             status = new_status;
             len_sum = len;
@@ -909,7 +995,11 @@ async fn setup_http2(client: &Client) -> Result<(ConnectionTime, ClientStateHttp
     let url = client.url_generator.generate(&mut rng)?;
     let (connection_time, send_request) = client.connect_http2(&url, &mut rng).await?;
 
-    let client_state = ClientStateHttp2 { rng, send_request };
+    let client_state = ClientStateHttp2 {
+        rng,
+        send_request,
+        response_chunks: 2,
+    };
 
     Ok((connection_time, client_state))
 }
@@ -953,7 +1043,7 @@ pub async fn work_debug(client: Arc<Client>) -> Result<(), ClientError> {
     let url = client.url_generator.generate(&mut rng)?;
     println!("URL: {}", url);
 
-    let request = client.request(&url)?;
+    let (_idx, request) = client.request(&url)?;
 
     println!("{:#?}", request);
 

@@ -12,18 +12,11 @@ use rand::prelude::*;
 use rand_regex::Regex;
 use ratatui::crossterm;
 use result_data::ResultData;
-use std::{
-    env,
-    fs::File,
-    io::{BufRead, Read},
-    path::Path,
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{env, fs::File, io::BufRead, path::Path, pin::Pin, str::FromStr, sync::Arc};
 use url::Url;
 use url_generator::UrlGenerator;
 
+mod body;
 mod client;
 mod db;
 mod histogram;
@@ -149,6 +142,11 @@ Note: If qps is specified, burst will be ignored",
     body_string: Option<String>,
     #[arg(help = "HTTP request body from file.", short = 'D')]
     body_path: Option<std::path::PathBuf>,
+    #[arg(
+        help = "HTTP request body from jsonline-formatted file (cycling through all the lines one at a time)",
+        short = 'J'
+    )]
+    body_jsonline: Option<std::path::PathBuf>,
     #[arg(help = "Content-Type.", short = 'T')]
     content_type: Option<String>,
     #[arg(help = "Basic authentication, username:password", short = 'a')]
@@ -236,6 +234,12 @@ Note: If qps is specified, burst will be ignored",
         help = "Perform a single request and dump the request and response"
     )]
     debug: bool,
+    #[arg(
+        long,
+        requires = "db_url",
+        help = "Keep responses body and store it to db"
+    )]
+    keep_responses: bool,
 }
 
 /// An entry specified by `connect-to` to override DNS resolution and default
@@ -460,14 +464,14 @@ async fn run() -> anyhow::Result<()> {
         headers
     };
 
-    let body: Option<&'static [u8]> = match (opts.body_string, opts.body_path) {
-        (Some(body), _) => Some(Box::leak(body.into_boxed_str().into_boxed_bytes())),
-        (_, Some(path)) => {
-            let mut buf = Vec::new();
-            std::fs::File::open(path)?.read_to_end(&mut buf)?;
-            Some(Box::leak(buf.into_boxed_slice()))
-        }
-        _ => None,
+    let body = if let Some(body) = opts.body_string {
+        body::BodyBuilder::from_string(body)?
+    } else if let Some(path) = opts.body_path {
+        body::BodyBuilder::from_file(path)?
+    } else if let Some(path) = opts.body_jsonline {
+        body::BodyBuilder::from_jsonline(path)?
+    } else {
+        body::BodyBuilder::new()
     };
 
     let print_mode = if opts.json {
@@ -493,6 +497,7 @@ async fn run() -> anyhow::Result<()> {
         method: opts.method,
         headers,
         body,
+        keep_responses: opts.keep_responses,
         dns: client::Dns {
             resolver,
             connect_to: opts.connect_to,
