@@ -12,10 +12,11 @@ use rand::prelude::*;
 use rand_regex::Regex;
 use ratatui::crossterm;
 use result_data::ResultData;
-use std::{env, io::Read, str::FromStr, sync::Arc};
+use std::{env, str::FromStr, sync::Arc};
 use url::Url;
 use url_generator::UrlGenerator;
 
+mod body;
 mod client;
 mod db;
 mod histogram;
@@ -417,14 +418,12 @@ async fn main() -> anyhow::Result<()> {
         headers
     };
 
-    let body: Option<&'static [u8]> = match (opts.body_string, opts.body_path) {
-        (Some(body), _) => Some(Box::leak(body.into_boxed_str().into_boxed_bytes())),
-        (_, Some(path)) => {
-            let mut buf = Vec::new();
-            std::fs::File::open(path)?.read_to_end(&mut buf)?;
-            Some(Box::leak(buf.into_boxed_slice()))
-        }
-        _ => None,
+    let body = if let Some(body) = opts.body_string {
+        body::Body::from_string(body)
+    } else if let Some(path) = opts.body_path {
+        body::Body::from_file(path)?
+    } else {
+        body::Body::empty()
     };
 
     let print_mode = if opts.json {

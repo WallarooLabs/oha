@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use url::{ParseError, Url};
 
 use crate::{
+    body::Body,
     pcg64si::Pcg64Si,
     url_generator::{UrlGenerator, UrlGeneratorError},
     ConnectToEntry,
@@ -165,7 +166,7 @@ pub struct Client {
     pub url_generator: UrlGenerator,
     pub method: http::Method,
     pub headers: http::header::HeaderMap,
-    pub body: Option<&'static [u8]>,
+    pub body: Body,
     pub dns: Dns,
     pub timeout: Option<std::time::Duration>,
     pub redirect_limit: usize,
@@ -463,11 +464,9 @@ impl Client {
             .headers_mut()
             .ok_or(ClientError::GetHeaderFromBuilderError)? = self.headers.clone();
 
-        if let Some(body) = self.body {
-            Ok(builder.body(Full::new(body))?)
-        } else {
-            Ok(builder.body(Full::default())?)
-        }
+        let body = self.body.next_body();
+        let request = builder.body(body)?;
+        Ok(request)
     }
 
     async fn work_http1(
