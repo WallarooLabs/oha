@@ -131,6 +131,11 @@ Note: If qps is specified, burst will be ignored",
     body_string: Option<String>,
     #[arg(help = "HTTP request body from file.", short = 'D')]
     body_path: Option<std::path::PathBuf>,
+    #[arg(
+        help = "HTTP request body from jsonline-formatted file (cycling through all the lines one at a time)",
+        short = 'J'
+    )]
+    body_jsonline: Option<std::path::PathBuf>,
     #[arg(help = "Content-Type.", short = 'T')]
     content_type: Option<String>,
     #[arg(help = "Basic authentication, username:password", short = 'a')]
@@ -419,11 +424,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let body = if let Some(body) = opts.body_string {
-        body::Body::from_string(body)
+        body::Body::from_string(body)?
     } else if let Some(path) = opts.body_path {
         body::Body::from_file(path)?
+    } else if let Some(path) = opts.body_jsonline {
+        body::Body::from_jsonline(path)?
     } else {
-        body::Body::empty()
+        body::Body::new()
     };
 
     let print_mode = if opts.json {
