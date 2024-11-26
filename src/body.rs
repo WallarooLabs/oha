@@ -48,14 +48,12 @@ impl Body {
 }
 
 struct DataRing {
-    items: Vec<&'static mut [u8]>,
+    items: Vec<Vec<u8>>,
     idx: AtomicUsize,
 }
 
 impl DataRing {
     fn from_vec(buf: Vec<u8>) -> Self {
-        let buf = buf.into_boxed_slice();
-        let buf = Box::leak(buf);
         let items = vec![buf];
         let idx = AtomicUsize::from(0);
         Self { items, idx }
@@ -68,16 +66,14 @@ impl DataRing {
     fn from_lines(text: String) -> Self {
         let items = text
             .lines()
-            .map(|line| line.to_string())
-            .map(|text| text.into_bytes().into_boxed_slice())
-            .map(Box::leak)
+            .map(|line| line.to_string().into_bytes())
             .collect();
         let idx = AtomicUsize::from(0);
         Self { items, idx }
     }
 
-    fn next_item(&'static self) -> &'static [u8] {
+    fn next_item(&self) -> &[u8] {
         let idx = self.idx.fetch_add(1, Ordering::SeqCst) % self.items.len();
-        self.items[idx]
+        &self.items[idx]
     }
 }
