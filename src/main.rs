@@ -423,13 +423,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let body = if let Some(body) = opts.body_string {
-        body::Body::from_string(body)?
+        body::BodyBuilder::from_string(body)?
     } else if let Some(path) = opts.body_path {
-        body::Body::from_file(path)?
+        body::BodyBuilder::from_file(path)?
     } else if let Some(path) = opts.body_jsonline {
-        body::Body::from_jsonline(path)?
+        body::BodyBuilder::from_jsonline(path)?
     } else {
-        body::Body::new()
+        body::BodyBuilder::new()
     };
 
     let print_mode = if opts.json {
