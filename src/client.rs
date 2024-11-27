@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use url::{ParseError, Url};
 
 use crate::{
-    body::Body,
+    body::BodyBuilder,
     pcg64si::Pcg64Si,
     url_generator::{UrlGenerator, UrlGeneratorError},
     ConnectToEntry,
@@ -166,7 +166,7 @@ pub struct Client {
     pub url_generator: UrlGenerator,
     pub method: http::Method,
     pub headers: http::header::HeaderMap,
-    pub body: Body,
+    pub body: BodyBuilder,
     pub dns: Dns,
     pub timeout: Option<std::time::Duration>,
     pub redirect_limit: usize,

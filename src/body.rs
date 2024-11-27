@@ -9,9 +9,9 @@ use http_body_util::Full;
 static DATA_RING: OnceLock<DataRing> = OnceLock::new();
 
 #[derive(Debug)]
-pub(crate) struct Body;
+pub(crate) struct BodyBuilder;
 
-impl Body {
+impl BodyBuilder {
     pub(crate) fn new() -> Self {
         Self
     }
