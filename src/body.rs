@@ -16,10 +16,19 @@ impl BodyBuilder {
         Self
     }
 
-    pub(crate) fn next_body(&self) -> Full<&'static [u8]> {
+    pub(crate) fn next_body(&self) -> (Id, Full<Body>) {
         DATA_RING
             .get()
             .map(|data| data.next_item())
+            .map(|(idx, bytes)| (Id(idx), Full::new(Body::from(bytes))))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn body_by_index(&self, idx: Id) -> Full<Body> {
+        DATA_RING
+            .get()
+            .and_then(|data| data.get(idx.0))
+            .map(Body::from)
             .map(Full::new)
             .unwrap_or_default()
     }
@@ -72,8 +81,48 @@ impl DataRing {
         Self { items, idx }
     }
 
-    fn next_item(&self) -> &[u8] {
+    fn next_item(&self) -> (usize, &[u8]) {
         let idx = self.idx.fetch_add(1, Ordering::SeqCst) % self.items.len();
-        &self.items[idx]
+        (idx, &self.items[idx])
+    }
+
+    fn get(&self, index: usize) -> Option<&[u8]> {
+        self.items.get(index).map(|bytes| bytes.as_slice())
+    }
+}
+
+#[derive(Debug)]
+pub struct Body {
+    buf: hyper::body::Bytes,
+}
+
+impl From<&'static [u8]> for Body {
+    fn from(bytes: &'static [u8]) -> Self {
+        let buf = hyper::body::Bytes::from_static(bytes);
+        Self { buf }
+    }
+}
+
+impl hyper::body::Buf for Body {
+    fn remaining(&self) -> usize {
+        self.buf.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.buf.chunk()
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.buf.advance(cnt);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Id(usize);
+
+impl rusqlite::ToSql for Id {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        let idx = self.0 as i64;
+        Ok(idx.into())
     }
 }

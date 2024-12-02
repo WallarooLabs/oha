@@ -11,7 +11,9 @@ fn create_db(conn: &Connection) -> Result<usize, rusqlite::Error> {
             end REAL NOT NULL,
             duration REAL NOT NULL,
             status INTEGER NOT NULL,
-            len_bytes INTEGER NOT NULL
+            len_bytes INTEGER NOT NULL,
+            idx INTEGER,
+            response TEXT
         )",
         (),
     )
@@ -31,8 +33,10 @@ pub fn store(
 
     for request in request_records {
         let url = client.generate_url(&mut request.rng.clone()).unwrap().0;
+        let response = request.text_response();
+
         affected_rows += t.execute(
-            "INSERT INTO oha (url, start, start_latency_correction, end, duration, status, len_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO oha (url, start, start_latency_correction, end, duration, status, len_bytes, idx, response) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 url.to_string(),
                 (request.start - start).as_secs_f64(),
@@ -41,6 +45,8 @@ pub fn store(
                 request.duration().as_secs_f64(),
                 request.status.as_u16() as i64,
                 request.len_bytes,
+                request.idx,
+                response,
             ),
         )?;
     }
@@ -55,6 +61,7 @@ mod test_db {
     use hyper::{HeaderMap, Method, Version};
     use rand::SeedableRng;
 
+    use crate::body::{BodyBuilder, Id};
     use crate::{client::Dns, url_generator::UrlGenerator};
 
     use super::*;
@@ -70,6 +77,8 @@ mod test_db {
             start: std::time::Instant::now(),
             connection_time: None,
             end: std::time::Instant::now(),
+            idx: Id::default(),
+            response: None,
         };
         let test_vec = vec![test_val.clone(), test_val.clone()];
         let client = Client {
@@ -77,7 +86,8 @@ mod test_db {
             url_generator: UrlGenerator::new_static("http://example.com".parse().unwrap()),
             method: Method::GET,
             headers: HeaderMap::new(),
-            body: None,
+            body: BodyBuilder::new(),
+            keep_responses: false,
             dns: Dns {
                 resolver: hickory_resolver::AsyncResolver::tokio_from_system_conf().unwrap(),
                 connect_to: Vec::new(),
