@@ -181,7 +181,10 @@ mod tests {
     use float_cmp::assert_approx_eq;
 
     use super::*;
-    use crate::client::{ClientError, ConnectionTime, RequestResult};
+    use crate::{
+        body::Id,
+        client::{ClientError, ConnectionTime, RequestResult},
+    };
     use std::time::{Duration, Instant};
 
     fn build_mock_request_result(
@@ -208,6 +211,8 @@ mod tests {
                 .unwrap(),
             status,
             len_bytes: size,
+            idx: Id::default(),
+            response: None,
         })
     }
 

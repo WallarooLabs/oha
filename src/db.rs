@@ -10,7 +10,9 @@ fn create_db(conn: &Connection) -> Result<usize, rusqlite::Error> {
             end REAL NOT NULL,
             duration REAL NOT NULL,
             status INTEGER NOT NULL,
-            len_bytes INTEGER NOT NULL
+            len_bytes INTEGER NOT NULL,
+            idx INTEGER,
+            response TEXT
         )",
         (),
     )
@@ -28,8 +30,9 @@ pub fn store(
     let mut affected_rows = 0;
 
     for request in request_records {
+        let response = request.text_response();
         affected_rows += t.execute(
-            "INSERT INTO oha (start, start_latency_correction, end, duration, status, len_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO oha (start, start_latency_correction, end, duration, status, len_bytes, idx, response) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 (request.start - start).as_secs_f64(),
                 request.start_latency_correction.map(|d| (d - start).as_secs_f64()),
@@ -37,6 +40,8 @@ pub fn store(
                 request.duration().as_secs_f64(),
                 request.status.as_u16() as i64,
                 request.len_bytes,
+                request.idx,
+                response,
             ),
         )?;
     }
@@ -48,6 +53,8 @@ pub fn store(
 
 #[cfg(test)]
 mod test_db {
+    use crate::body::Id;
+
     use super::*;
 
     #[test]
@@ -60,6 +67,8 @@ mod test_db {
             start: std::time::Instant::now(),
             connection_time: None,
             end: std::time::Instant::now(),
+            idx: Id::default(),
+            response: None,
         };
         let test_vec = vec![test_val.clone(), test_val.clone()];
         let result = store(":memory:", start, &test_vec);

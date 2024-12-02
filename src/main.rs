@@ -214,6 +214,12 @@ Note: If qps is specified, burst will be ignored",
         help = "Perform a single request and dump the request and response"
     )]
     debug: bool,
+    #[arg(
+        long,
+        requires = "db_url",
+        help = "Keep responses body and store it to db"
+    )]
+    keep_responses: bool,
 }
 
 /// An entry specified by `connect-to` to override DNS resolution and default
@@ -456,6 +462,7 @@ async fn main() -> anyhow::Result<()> {
         method: opts.method,
         headers,
         body,
+        keep_responses: opts.keep_responses,
         dns: client::Dns {
             resolver,
             connect_to: opts.connect_to,
